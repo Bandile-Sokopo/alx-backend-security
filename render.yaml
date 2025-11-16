@@ -1,8 +1,8 @@
 databases:
   - name: alx-backend-security
     plan: free
-    databaseName: alx-backend-security
-    user: alx-backend-security
+    databaseName: alxbackendsecurity
+    user: alx
 
 services:
   - type: web
