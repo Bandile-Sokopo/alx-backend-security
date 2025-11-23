@@ -1,48 +1,57 @@
-from django.utils import timezone
+import requests
 from django.http import HttpResponseForbidden
 from django.core.cache import cache
-from ip_tracking.models import RequestLog, BlockedIP
-from ipgeolocation import IpGeolocationAPI
+from .models import RequestLog, BlockedIP
+
+GEO_CACHE_TTL = 60 * 60 * 24  # 24 hours
 
 
-class RequestLoggingMiddleware:
-    """Middleware to log requests with geolocation and block blacklisted IPs."""
-
+class IPTrackingMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
-        self.geo = IpGeolocationAPI()
 
     def __call__(self, request):
-        ip = request.META.get("REMOTE_ADDR", "")
-        path = request.path
-        timestamp = timezone.now()
 
-        # Block blacklisted IPs
+        # Extract IP
+        ip = (
+            request.META.get("HTTP_X_FORWARDED_FOR").split(",")[0]
+            if request.META.get("HTTP_X_FORWARDED_FOR")
+            else request.META.get("REMOTE_ADDR")
+        )
+
+        # ---- Block IP if blacklisted ----
         if BlockedIP.objects.filter(ip_address=ip).exists():
-            return HttpResponseForbidden("Access denied: your IP is blocked.")
+            return HttpResponseForbidden("Your IP address is blocked.")
 
-        # --- Geolocation lookup (with caching) ---
-        cache_key = f"geo_{ip}"
-        geo_data = cache.get(cache_key)
+        # ---- Try cache first ----
+        cache_key = f"geo_ip_{ip}"
+        geo = cache.get(cache_key)
 
-        if not geo_data:
-            try:
-                geo_info = self.geo.get_geolocation(ip)
-                geo_data = {
-                    "country": geo_info.get("country_name", "Unknown"),
-                    "city": geo_info.get("city", "Unknown"),
-                }
-                cache.set(cache_key, geo_data, 60 * 60 * 24)  # Cache 24 hours
-            except Exception:
-                geo_data = {"country": "Unknown", "city": "Unknown"}
+        if not geo:
+            geo = self.get_geolocation(ip)
+            cache.set(cache_key, geo, GEO_CACHE_TTL)
 
-        # Log request
+        # ---- Log request ----
         RequestLog.objects.create(
             ip_address=ip,
-            path=path,
-            timestamp=timestamp,
-            country=geo_data.get("country"),
-            city=geo_data.get("city"),
+            path=request.path,
+            country=geo.get("country"),
+            city=geo.get("city"),
         )
 
         return self.get_response(request)
+
+    def get_geolocation(self, ip):
+        """Fetch geolocation from ipapi.co (free, no key needed)."""
+        try:
+            response = requests.get(f"https://ipapi.co/{ip}/json/", timeout=2)
+            data = response.json()
+
+            return {
+                "country": data.get("country_name"),
+                "city": data.get("city"),
+            }
+
+        except Exception:
+            # If API fails, return null values
+            return {"country": None, "city": None}
